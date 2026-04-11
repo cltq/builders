@@ -2,31 +2,37 @@
   {
     "name": "yay",
     "description": "AUR helper and pacman wrapper written in Go",
-    "watch": true
+    "watch": true,
+    "slow": false
   },
   {
     "name": "spotify",
     "description": "Music streaming service client",
-    "watch": true
+    "watch": true,
+    "slow": false
   },
   {
     "name": "brave-bin",
     "description": "Privacy-focused Chromium-based web browser",
-    "watch": true
+    "watch": true,
+    "slow": false
   },
   {
     "name": "darkly",
     "description": "A flat dark Qt style based on Breeze",
-    "watch": true
+    "watch": true,
+    "slow": true
   },
   {
     "name": "quickshell",
     "description": "Scriptable toolkit for creating desktop shells using Qt Quick",
-    "watch": true
+    "watch": true,
+    "slow": true
   },
   {
     "name": "visual-studio-code-bin",
     "description": "Visual Studio Code editor (official Microsoft binary)",
-    "watch": true
+    "watch": true,
+    "slow": false
   }
 ]
