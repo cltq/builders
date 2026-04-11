@@ -1,0 +1,17 @@
+[
+  {
+    "name": "yay",
+    "description": "AUR helper written in Go",
+    "watch": true
+  },
+  {
+    "name": "spotify",
+    "description": "Music streaming service client",
+    "watch": true
+  },
+  {
+    "name": "brave-bin",
+    "description": "Privacy-focused web browser",
+    "watch": true
+  }
+]
