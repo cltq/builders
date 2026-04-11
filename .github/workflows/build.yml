@@ -452,7 +452,11 @@ jobs:
           </body></html>
           HTML
 
-          echo "VERSIONS_JSON=$VERSIONS_JSON" >> $GITHUB_ENV
+          {
+            echo "VERSIONS_JSON<<EOF"
+            echo "${VERSIONS_JSON:-{}}"
+            echo "EOF"
+          } >> $GITHUB_ENV
           SCRIPT
           '
 
@@ -608,7 +612,11 @@ jobs:
           </body></html>
           HTML
 
-          echo "VERSIONS_JSON=$VERSIONS_JSON" >> $GITHUB_ENV
+          {
+            echo "VERSIONS_JSON<<EOF"
+            echo "${VERSIONS_JSON:-{}}"
+            echo "EOF"
+          } >> $GITHUB_ENV
           SCRIPT
           '
 
