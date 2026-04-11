@@ -6,8 +6,16 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
-  release:
-    types: [created]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -27,7 +35,6 @@ jobs:
             sudo
 
       - name: Create build user
-        # makepkg refuses to run as root, so we need a non-root user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
@@ -36,7 +43,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Jguer/yay
-          ref: next  # or pin to a tag like v12.3.5
+          ref: next  # pin to a tag like v12.3.5 for reproducible builds
           path: yay
 
       - name: Fix ownership for build user
@@ -57,28 +64,150 @@ jobs:
           "
 
       - name: Verify binary
+        run: ./yay/yay --version
+
+      - name: Get yay version
+        id: version
+        run: echo "version=$(./yay/yay --version | head -n1)" >> $GITHUB_OUTPUT
+
+      - name: Prepare Pages site
         run: |
-          ./yay/yay --version
+          mkdir -p site
+          cp yay/yay site/yay
 
-      - name: Upload yay binary artifact
-        uses: actions/upload-artifact@v4
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          cat > site/index.html <<HTML
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>yay builds</title>
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+                background: #0d1117;
+                color: #e6edf3;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 2rem;
+              }
+              .card {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 12px;
+                padding: 2.5rem 3rem;
+                max-width: 520px;
+                width: 100%;
+              }
+              .badge {
+                display: inline-block;
+                background: #388bfd22;
+                color: #58a6ff;
+                border: 1px solid #388bfd55;
+                border-radius: 999px;
+                font-size: 0.75rem;
+                padding: 2px 10px;
+                margin-bottom: 1.2rem;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+              }
+              h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.4rem; }
+              .subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+              .meta {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 1rem 1.2rem;
+                font-size: 0.82rem;
+                color: #8b949e;
+                margin-bottom: 2rem;
+                display: grid;
+                gap: 0.4rem;
+              }
+              .meta span { color: #e6edf3; }
+              .dl-btn {
+                display: flex;
+                align-items: center;
+                gap: 0.6rem;
+                background: #238636;
+                color: #fff;
+                text-decoration: none;
+                padding: 0.75rem 1.4rem;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 0.95rem;
+                transition: background 0.15s;
+                width: fit-content;
+              }
+              .dl-btn:hover { background: #2ea043; }
+              .install {
+                margin-top: 2rem;
+                font-size: 0.82rem;
+                color: #8b949e;
+              }
+              .install code {
+                display: block;
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 0.6rem 1rem;
+                margin-top: 0.5rem;
+                color: #79c0ff;
+                word-break: break-all;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="badge">Latest Build</div>
+              <h1>yay</h1>
+              <p class="subtitle">Yet Another Yogurt — AUR helper &amp; pacman wrapper</p>
+              <div class="meta">
+                <div>Version &nbsp;<span>${VERSION}</span></div>
+                <div>Commit &nbsp;<span>${SHORT_SHA}</span></div>
+                <div>Built &nbsp;<span>${BUILD_DATE}</span></div>
+                <div>Target &nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
+              </div>
+              <a class="dl-btn" href="yay" download="yay">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/>
+                  <path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/>
+                </svg>
+                Download yay binary
+              </a>
+              <div class="install">
+                Or fetch &amp; install directly:
+                <code>curl -Lo yay https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/yay &amp;&amp; chmod +x yay &amp;&amp; sudo mv yay /usr/local/bin/</code>
+              </div>
+            </div>
+          </body>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: yay-linux-x86_64
-          path: yay/yay
-          retention-days: 7
+          path: site
 
-      - name: Build PKGBUILD package (optional)
-        if: github.event_name == 'release'
-        run: |
-          su builder -c "
-            cd yay
-            makepkg -si --noconfirm
-          "
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
 
-      - name: Upload release asset
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: yay/yay
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
