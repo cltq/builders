@@ -185,7 +185,7 @@ jobs:
 
       - name: Build .pkg.tar.zst
         run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
+          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar --skipchecksums"
 
       - name: Collect package info & sanitize filename
         id: info
@@ -291,7 +291,7 @@ jobs:
 
       - name: Build .pkg.tar.zst
         run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
+          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar --skipchecksums"
 
       - name: Collect package info & sanitize filename
         id: info
