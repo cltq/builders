@@ -150,6 +150,24 @@ jobs:
             fi
           "
 
+      - name: Import required GPG keys
+        run: |
+          su builder -c "
+            cd /build
+            source ./PKGBUILD 2>/dev/null || true
+            if [ -n \"\${validpgpkeys[*]+x}\" ]; then
+              for KEY in \"\${validpgpkeys[@]}\"; do
+                echo \"Importing GPG key: \$KEY\"
+                gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys \"\$KEY\" 2>/dev/null \
+                || gpg --keyserver hkps://keys.openpgp.org   --recv-keys \"\$KEY\" 2>/dev/null \
+                || gpg --keyserver hkp://pgp.mit.edu         --recv-keys \"\$KEY\" 2>/dev/null \
+                || echo \"WARNING: Could not import \$KEY from any keyserver\"
+              done
+            else
+              echo \"No validpgpkeys defined, skipping.\"
+            fi
+          "
+
       - name: Build .pkg.tar.zst
         run: |
           su builder -c "
