@@ -157,16 +157,28 @@ jobs:
             makepkg -s --noconfirm --noprogressbar
           "
 
-      - name: Collect package info
+      - name: Collect package info & sanitize filename
         id: info
         run: |
           PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
           PKG_FILENAME=$(basename "$PKG_FILE")
-          PKG_VERSION=$(echo "$PKG_FILENAME" \
+
+          # Colons (from epoch versions like 1:1.89.x) are invalid in
+          # GitHub Actions artifact paths and problematic in URLs — replace with _
+          SAFE_FILENAME=$(echo "$PKG_FILENAME" | tr ':' '_')
+
+          if [ "$PKG_FILENAME" != "$SAFE_FILENAME" ]; then
+            mv "$PKG_FILE" "/build/$SAFE_FILENAME"
+            echo "Renamed: $PKG_FILENAME → $SAFE_FILENAME"
+          fi
+
+          # Extract version: strip leading <name>- and trailing -<arch>.pkg.tar.zst
+          PKG_VERSION=$(echo "$SAFE_FILENAME" \
             | sed "s/^${{ matrix.name }}-//" \
             | sed 's/-[^-]*\.pkg\.tar\.zst$//')
-          echo "filename=$PKG_FILENAME" >> $GITHUB_OUTPUT
-          echo "version=$PKG_VERSION"   >> $GITHUB_OUTPUT
+
+          echo "filename=$SAFE_FILENAME" >> $GITHUB_OUTPUT
+          echo "version=$PKG_VERSION"    >> $GITHUB_OUTPUT
 
       - name: Write package metadata
         run: |
