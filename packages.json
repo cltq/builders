@@ -34,5 +34,23 @@
     "description": "Visual Studio Code editor (official Microsoft binary)",
     "watch": true,
     "slow": false
+  },
+  {
+    "name": "minecraft-launcher",
+    "description": "Official Minecraft Launcher",
+    "watch": true,
+    "slow": false
+  },
+  {
+    "name": "modrinth-app-bin",
+    "description": "Modrinth Desktop App",
+    "watch": true,
+    "slow": false
+  },
+  {
+    "name": "tuxmanager",
+    "description": "Windows-like System Monitor",
+    "watch": true,
+    "slow": false
   }
 ]
