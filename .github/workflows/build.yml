@@ -32,10 +32,10 @@ jobs:
     name: Check versions
     runs-on: ubuntu-latest
     outputs:
-      fast_matrix:      ${{ steps.set-matrix.outputs.fast_matrix }}
-      slow_matrix:      ${{ steps.set-matrix.outputs.slow_matrix }}
-      has_fast:         ${{ steps.set-matrix.outputs.has_fast }}
-      has_slow:         ${{ steps.set-matrix.outputs.has_slow }}
+      fast_matrix: ${{ steps.set-matrix.outputs.fast_matrix }}
+      slow_matrix:  ${{ steps.set-matrix.outputs.slow_matrix }}
+      has_fast:     ${{ steps.set-matrix.outputs.has_fast }}
+      has_slow:     ${{ steps.set-matrix.outputs.has_slow }}
 
     steps:
       - name: Checkout repo
@@ -44,7 +44,7 @@ jobs:
       - name: Resolve build matrices
         id: set-matrix
         env:
-          TRIGGER: ${{ github.event_name }}
+          TRIGGER:   ${{ github.event_name }}
           FORCE_ALL: ${{ github.event.inputs.force_all || 'false' }}
         run: |
           python3 - <<'EOF'
@@ -93,7 +93,7 @@ jobs:
                   if known.get(name) == latest:
                       print(f"  skip {name}: already at {latest}")
                       continue
-                  print(f"  queue {name} ({'slow' if is_slow else 'fast'}): {known.get(name, 'new')} → {latest}")
+                  print(f"  queue {name} ({'slow' if is_slow else 'fast'}): {known.get(name, 'new')} -> {latest}")
               else:
                   print(f"  queue {name} ({'slow' if is_slow else 'fast'}): forced/push build")
 
@@ -111,13 +111,7 @@ jobs:
           EOF
 
 # ---------------------------------------------------------------------------
-# Reusable build steps (defined once, referenced by both build jobs)
-# Both build_fast and build_slow use the same container + steps.
-# The only difference is which matrix they consume and the artifact prefix.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# JOB 2a — fast packages (yay, spotify, brave, vscode …)
+# JOB 2a — fast packages
 # ---------------------------------------------------------------------------
   build_fast:
     name: "Fast: ${{ matrix.name }}"
@@ -184,8 +178,7 @@ jobs:
           "
 
       - name: Build .pkg.tar.zst
-        run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar --skipchecksums"
+        run: su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
 
       - name: Collect package info & sanitize filename
         id: info
@@ -223,7 +216,7 @@ jobs:
             /build/meta.json
 
 # ---------------------------------------------------------------------------
-# JOB 2b — slow packages (darkly, quickshell …)
+# JOB 2b — slow packages
 # ---------------------------------------------------------------------------
   build_slow:
     name: "Slow: ${{ matrix.name }}"
@@ -290,8 +283,7 @@ jobs:
           "
 
       - name: Build .pkg.tar.zst
-        run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar --skipchecksums"
+        run: su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
 
       - name: Collect package info & sanitize filename
         id: info
@@ -329,7 +321,11 @@ jobs:
             /build/meta.json
 
 # ---------------------------------------------------------------------------
-# JOB 3a — deploy fast packages immediately, don't wait for slow builds
+# Shared shell function used by both assemble jobs
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# JOB 3a — deploy fast packages immediately
 # ---------------------------------------------------------------------------
   assemble_fast:
     name: Deploy (fast packages)
@@ -358,85 +354,112 @@ jobs:
 
       - name: Build site & pacman repo
         run: |
-          bash -c '
-          set -euo pipefail
-          source /dev/stdin <<'"'"'SCRIPT'"'"'
-          mkdir -p site
-          VERSIONS_JSON="{}"
-          CARDS_HTML=""
-          BUILD_DATE=$(date -u "+%Y-%m-%d %H:%M UTC")
+          python3 << 'PYEOF'
+          import json, os, shutil, subprocess
+          from pathlib import Path
 
-          for PKG_DIR in artifacts/pkg-fast-*/; do
-            META="$PKG_DIR/meta.json"
-            PKG_FILE=$(ls "$PKG_DIR"/*.pkg.tar.zst 2>/dev/null | head -n1)
-            [ -f "$META" ] && [ -f "$PKG_FILE" ] || continue
+          site = Path("site")
+          site.mkdir(exist_ok=True)
 
-            NAME=$(python3     -c "import json; print(json.load(open(\"$META\"))[\"name\"])")
-            DESC=$(python3     -c "import json; print(json.load(open(\"$META\"))[\"description\"])")
-            VERSION=$(python3  -c "import json; print(json.load(open(\"$META\"))[\"version\"])")
-            FILENAME=$(python3 -c "import json; print(json.load(open(\"$META\"))[\"filename\"])")
-            BUILT_AT=$(python3 -c "import json; print(json.load(open(\"$META\"))[\"built_at\"])")
+          build_date = subprocess.check_output(["date", "-u", "+%Y-%m-%d %H:%M UTC"]).decode().strip()
+          versions = {}
+          cards = []
 
-            VERSIONS_JSON=$(python3 -c "
-          import json, sys
-          v = json.loads(sys.argv[1])
-          v[sys.argv[2]] = sys.argv[3]
-          print(json.dumps(v))
-          " "$VERSIONS_JSON" "$NAME" "$VERSION")
+          for meta_path in sorted(Path("artifacts").glob("*/meta.json")):
+              pkg_dir = meta_path.parent
+              pkg_files = list(pkg_dir.glob("*.pkg.tar.zst"))
+              if not pkg_files:
+                  continue
+              pkg_file = pkg_files[0]
 
-            cp "$PKG_FILE" "site/$FILENAME"
-            mkdir -p "site/$NAME"
-            cp "$PKG_FILE" "site/$NAME/$FILENAME"
-            cp "$META"     "site/$NAME/meta.json"
+              with open(meta_path) as f:
+                  m = json.load(f)
 
-            cat > "site/$NAME/index.html" <<HTML
-          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>${NAME} — builders</title>
-          <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}.back{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}.back:hover{text-decoration:underline}.badge{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}h1{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}.subtitle{color:#8b949e;font-size:.9rem;margin-bottom:2rem}.meta{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}.meta span{color:#e6edf3}.dl-btn{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}.dl-btn:hover{background:#2ea043}h2{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}.cmd{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem}.cmd:hover{border-color:#58a6ff}.cmd::after{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}.section{margin-top:1.5rem}</style></head>
+              name     = m["name"]
+              desc     = m["description"]
+              version  = m["version"]
+              filename = m["filename"]
+              built_at = m["built_at"]
+
+              versions[name] = version
+
+              # Copy package to site root (for pacman repo) and per-package dir
+              shutil.copy(pkg_file, site / filename)
+              pkg_page = site / name
+              pkg_page.mkdir(exist_ok=True)
+              shutil.copy(pkg_file, pkg_page / filename)
+              shutil.copy(meta_path, pkg_page / "meta.json")
+
+              cards.append({"name": name, "desc": desc, "version": version,
+                            "filename": filename, "built_at": built_at})
+
+              # Per-package page
+              (pkg_page / "index.html").write_text(f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+          <title>{name} — builders</title>
+          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}}.card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}}.back{{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}}.back:hover{{text-decoration:underline}}.badge{{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}}h1{{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}}.subtitle{{color:#8b949e;font-size:.9rem;margin-bottom:2rem}}.meta{{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}}.meta span{{color:#e6edf3}}.dl-btn{{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}}.dl-btn:hover{{background:#2ea043}}h2{{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem;display:block}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}}.section{{margin-top:1.5rem}}</style></head>
           <body><div class="card">
             <a class="back" href=".."><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"/></svg> All packages</a>
             <div class="badge">Latest Build</div>
-            <h1>${NAME}</h1><p class="subtitle">${DESC}</p>
+            <h1>{name}</h1><p class="subtitle">{desc}</p>
             <div class="meta">
-              <div>Version &nbsp;<span>${VERSION}</span></div>
-              <div>File &nbsp;<span>${FILENAME}</span></div>
-              <div>Built &nbsp;<span>${BUILT_AT}</span></div>
-              <div>Target &nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
+              <div>Version&nbsp;<span>{version}</span></div>
+              <div>File&nbsp;<span>{filename}</span></div>
+              <div>Built&nbsp;<span>{built_at}</span></div>
+              <div>Target&nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
             </div>
-            <a class="dl-btn" href="${FILENAME}" download="${FILENAME}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download ${FILENAME}</a>
+            <a class="dl-btn" href="{filename}" download="{filename}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download {filename}</a>
             <div class="section"><h2>Install via pacman repo</h2>
               <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
           Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy ${NAME}</div>
+              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy {name}</div>
             </div>
             <div class="section"><h2>One-off install</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/${FILENAME}</div>
+              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/{filename}</div>
             </div>
           </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{el.addEventListener("click",()=>{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)})});</script>
-          </body></html>
-          HTML
+          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
+          </body></html>""")
 
-            CARDS_HTML="${CARDS_HTML}
-              <a class=\"pkg-card\" href=\"${NAME}/\">
-                <div class=\"pkg-name\">${NAME}</div>
-                <div class=\"pkg-desc\">${DESC}</div>
-                <div class=\"pkg-meta\">
-                  <span class=\"pkg-version\">${VERSION}</span>
-                  <span class=\"pkg-date\">${BUILT_AT}</span>
-                  <span class=\"arrow\">→</span>
+          # Generate pacman repo database
+          pkg_files_in_site = list(site.glob("*.pkg.tar.zst"))
+          subprocess.run(["repo-add", "--new", "--remove", "builders.db.tar.gz"] +
+                         [str(p) for p in pkg_files_in_site],
+                         cwd=site, check=True)
+
+          # GitHub Pages doesn't serve symlinks — copy real files
+          for link_name, tar_name in [("builders.db", "builders.db.tar.gz"),
+                                       ("builders.files", "builders.files.tar.gz")]:
+              link = site / link_name
+              tar  = site / tar_name
+              if link.is_symlink():
+                  link.unlink()
+              if tar.exists():
+                  shutil.copy(tar, link)
+
+          # Build cards HTML
+          cards_html = ""
+          for c in cards:
+              cards_html += f"""
+              <a class="pkg-card" href="{c['name']}/">
+                <div class="pkg-name">{c['name']}</div>
+                <div class="pkg-desc">{c['desc']}</div>
+                <div class="pkg-meta">
+                  <span class="pkg-version">{c['version']}</span>
+                  <span class="pkg-date">{c['built_at']}</span>
+                  <span class="arrow">&#8594;</span>
                 </div>
-              </a>"
-          done
+              </a>"""
 
-          cd site && repo-add --new --remove builders.db.tar.gz *.pkg.tar.zst && cd ..
-
-          cat > site/index.html <<HTML
-          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>builders — cltq</title>
-          <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}.wrap{max-width:860px;margin:0 auto}header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}header h1{font-size:1.5rem;font-weight:700}header a{color:#58a6ff}.setup{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}.setup h2{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}.setup p{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}.cmd{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}.cmd:hover{border-color:#58a6ff}.cmd::after{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}.pkg-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}.pkg-card:hover{border-color:#58a6ff;background:#1c2230}.pkg-name{font-size:1.05rem;font-weight:600}.pkg-desc{font-size:.82rem;color:#8b949e;flex:1}.pkg-meta{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}.pkg-version{font-size:.78rem;color:#79c0ff;font-family:monospace}.pkg-date{font-size:.75rem;color:#484f58}.arrow{color:#30363d;margin-left:auto}.pkg-card:hover .arrow{color:#58a6ff}.notice{font-size:.78rem;color:#484f58;margin-top:2rem;text-align:center}</style></head>
+          # Root index
+          (site / "index.html").write_text(f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+          <title>builders — cltq</title>
+          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}}.wrap{{max-width:860px;margin:0 auto}}header{{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}}header h1{{font-size:1.5rem;font-weight:700}}header a{{color:#58a6ff}}.setup{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}}.setup h2{{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}}.setup p{{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.pkg-card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}}.pkg-card:hover{{border-color:#58a6ff;background:#1c2230}}.pkg-name{{font-size:1.05rem;font-weight:600}}.pkg-desc{{font-size:.82rem;color:#8b949e;flex:1}}.pkg-meta{{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}}.pkg-version{{font-size:.78rem;color:#79c0ff;font-family:monospace}}.pkg-date{{font-size:.75rem;color:#484f58}}.arrow{{color:#30363d;margin-left:auto}}.pkg-card:hover .arrow{{color:#58a6ff}}.notice{{font-size:.78rem;color:#484f58;margin-top:2rem;text-align:center}}</style></head>
           <body><div class="wrap">
             <header>
               <div><h1>builders</h1><p style="color:#8b949e;font-size:.85rem">Pre-built Arch Linux packages — <a href="https://github.com/cltq/builders">cltq/builders</a></p></div>
-              <p style="color:#484f58;font-size:.8rem">${BUILD_DATE}</p>
+              <p style="color:#484f58;font-size:.8rem">{build_date}</p>
             </header>
             <div class="setup">
               <h2>Add as pacman repository</h2>
@@ -445,55 +468,47 @@ jobs:
           Server = https://cltq.github.io/builders</div>
               <div class="cmd" onclick="navigator.clipboard.writeText('sudo pacman -Sy')">sudo pacman -Sy</div>
             </div>
-            <div class="grid">${CARDS_HTML}</div>
-            <p class="notice">⏳ Some packages (darkly, quickshell) have longer build times and may appear here after a delay.</p>
+            <div class="grid">{cards_html}</div>
+            <p class="notice">&#9203; Some packages (darkly, quickshell) have longer build times and may appear here after a delay.</p>
           </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{el.addEventListener("click",()=>{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)})});</script>
-          </body></html>
-          HTML
+          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
+          </body></html>""")
 
-          {
-            echo "VERSIONS_JSON<<EOF"
-            echo "${VERSIONS_JSON:-{}}"
-            echo "EOF"
-          } >> $GITHUB_ENV
-          SCRIPT
-          '
+          # Write versions for next step
+          with open("new_versions.json", "w") as f:
+              json.dump(versions, f)
+          PYEOF
 
       - name: Update versions.json
         run: |
-          python3 - <<EOF
-          import json, os
-          
+          python3 - <<'EOF'
+          import json
           try:
               with open("versions.json") as f:
                   existing = json.load(f)
           except FileNotFoundError:
               existing = {}
-          
-          data = os.environ.get("VERSIONS_JSON")
-          
-          if not data:
-              print("No VERSIONS_JSON found, skipping update.")
-              exit(0)
-          
-          existing.update(json.loads(data))
-          
+          with open("new_versions.json") as f:
+              existing.update(json.load(f))
           with open("versions.json", "w") as f:
               json.dump(existing, f, indent=2)
           EOF
-          
-                - name: Upload Pages artifact
-                  uses: actions/upload-pages-artifact@v3
-                  with:
-                    path: site
-          
-                - name: Deploy to GitHub Pages
-                  uses: actions/deploy-pages@v4
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          git diff --cached --quiet || git commit -m "chore: update built versions (fast) [skip ci]"
+          git push
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
 
 # ---------------------------------------------------------------------------
-# JOB 3b — deploy full site once slow packages are also done
-#           downloads both fast AND slow artifacts so the site is complete
+# JOB 3b — deploy full site once slow packages finish
 # ---------------------------------------------------------------------------
   assemble_full:
     name: Deploy (all packages)
@@ -525,85 +540,110 @@ jobs:
 
       - name: Build site & pacman repo
         run: |
-          bash -c '
-          set -euo pipefail
-          source /dev/stdin <<'"'"'SCRIPT'"'"'
-          mkdir -p site
-          VERSIONS_JSON="{}"
-          CARDS_HTML=""
-          BUILD_DATE=$(date -u "+%Y-%m-%d %H:%M UTC")
+          python3 << 'PYEOF'
+          import json, os, shutil, subprocess
+          from pathlib import Path
 
-          for PKG_DIR in artifacts/pkg-*/; do
-            META="$PKG_DIR/meta.json"
-            PKG_FILE=$(ls "$PKG_DIR"/*.pkg.tar.zst 2>/dev/null | head -n1)
-            [ -f "$META" ] && [ -f "$PKG_FILE" ] || continue
+          site = Path("site")
+          site.mkdir(exist_ok=True)
 
-            NAME=$(python3     -c "import json; print(json.load(open(\"$META\"))[\"name\"])")
-            DESC=$(python3     -c "import json; print(json.load(open(\"$META\"))[\"description\"])")
-            VERSION=$(python3  -c "import json; print(json.load(open(\"$META\"))[\"version\"])")
-            FILENAME=$(python3 -c "import json; print(json.load(open(\"$META\"))[\"filename\"])")
-            BUILT_AT=$(python3 -c "import json; print(json.load(open(\"$META\"))[\"built_at\"])")
+          build_date = subprocess.check_output(["date", "-u", "+%Y-%m-%d %H:%M UTC"]).decode().strip()
+          versions = {}
+          cards = []
 
-            VERSIONS_JSON=$(python3 -c "
-          import json, sys
-          v = json.loads(sys.argv[1])
-          v[sys.argv[2]] = sys.argv[3]
-          print(json.dumps(v))
-          " "$VERSIONS_JSON" "$NAME" "$VERSION")
+          for meta_path in sorted(Path("artifacts").glob("*/meta.json")):
+              pkg_dir = meta_path.parent
+              pkg_files = list(pkg_dir.glob("*.pkg.tar.zst"))
+              if not pkg_files:
+                  continue
+              pkg_file = pkg_files[0]
 
-            cp "$PKG_FILE" "site/$FILENAME"
-            mkdir -p "site/$NAME"
-            cp "$PKG_FILE" "site/$NAME/$FILENAME"
-            cp "$META"     "site/$NAME/meta.json"
+              with open(meta_path) as f:
+                  m = json.load(f)
 
-            cat > "site/$NAME/index.html" <<HTML
-          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>${NAME} — builders</title>
-          <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}.back{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}.back:hover{text-decoration:underline}.badge{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}h1{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}.subtitle{color:#8b949e;font-size:.9rem;margin-bottom:2rem}.meta{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}.meta span{color:#e6edf3}.dl-btn{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}.dl-btn:hover{background:#2ea043}h2{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}.cmd{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem}.cmd:hover{border-color:#58a6ff}.cmd::after{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}.section{margin-top:1.5rem}</style></head>
+              name     = m["name"]
+              desc     = m["description"]
+              version  = m["version"]
+              filename = m["filename"]
+              built_at = m["built_at"]
+
+              versions[name] = version
+
+              shutil.copy(pkg_file, site / filename)
+              pkg_page = site / name
+              pkg_page.mkdir(exist_ok=True)
+              shutil.copy(pkg_file, pkg_page / filename)
+              shutil.copy(meta_path, pkg_page / "meta.json")
+
+              cards.append({"name": name, "desc": desc, "version": version,
+                            "filename": filename, "built_at": built_at})
+
+              (pkg_page / "index.html").write_text(f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+          <title>{name} — builders</title>
+          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}}.card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}}.back{{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}}.back:hover{{text-decoration:underline}}.badge{{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}}h1{{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}}.subtitle{{color:#8b949e;font-size:.9rem;margin-bottom:2rem}}.meta{{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}}.meta span{{color:#e6edf3}}.dl-btn{{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}}.dl-btn:hover{{background:#2ea043}}h2{{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem;display:block}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}}.section{{margin-top:1.5rem}}</style></head>
           <body><div class="card">
             <a class="back" href=".."><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"/></svg> All packages</a>
             <div class="badge">Latest Build</div>
-            <h1>${NAME}</h1><p class="subtitle">${DESC}</p>
+            <h1>{name}</h1><p class="subtitle">{desc}</p>
             <div class="meta">
-              <div>Version &nbsp;<span>${VERSION}</span></div>
-              <div>File &nbsp;<span>${FILENAME}</span></div>
-              <div>Built &nbsp;<span>${BUILT_AT}</span></div>
-              <div>Target &nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
+              <div>Version&nbsp;<span>{version}</span></div>
+              <div>File&nbsp;<span>{filename}</span></div>
+              <div>Built&nbsp;<span>{built_at}</span></div>
+              <div>Target&nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
             </div>
-            <a class="dl-btn" href="${FILENAME}" download="${FILENAME}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download ${FILENAME}</a>
+            <a class="dl-btn" href="{filename}" download="{filename}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download {filename}</a>
             <div class="section"><h2>Install via pacman repo</h2>
               <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
           Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy ${NAME}</div>
+              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy {name}</div>
             </div>
             <div class="section"><h2>One-off install</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/${FILENAME}</div>
+              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/{filename}</div>
             </div>
           </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{el.addEventListener("click",()=>{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)})});</script>
-          </body></html>
-          HTML
+          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
+          </body></html>""")
 
-            CARDS_HTML="${CARDS_HTML}
-              <a class=\"pkg-card\" href=\"${NAME}/\">
-                <div class=\"pkg-name\">${NAME}</div>
-                <div class=\"pkg-desc\">${DESC}</div>
-                <div class=\"pkg-meta\">
-                  <span class=\"pkg-version\">${VERSION}</span>
-                  <span class=\"pkg-date\">${BUILT_AT}</span>
-                  <span class=\"arrow\">→</span>
+          # Generate pacman repo database
+          pkg_files_in_site = list(site.glob("*.pkg.tar.zst"))
+          subprocess.run(["repo-add", "--new", "--remove", "builders.db.tar.gz"] +
+                         [str(p) for p in pkg_files_in_site],
+                         cwd=site, check=True)
+
+          # GitHub Pages doesn't serve symlinks — replace with real files
+          for link_name, tar_name in [("builders.db", "builders.db.tar.gz"),
+                                       ("builders.files", "builders.files.tar.gz")]:
+              link = site / link_name
+              tar  = site / tar_name
+              if link.is_symlink():
+                  link.unlink()
+              if tar.exists():
+                  shutil.copy(tar, link)
+
+          # Build cards HTML
+          cards_html = ""
+          for c in cards:
+              cards_html += f"""
+              <a class="pkg-card" href="{c['name']}/">
+                <div class="pkg-name">{c['name']}</div>
+                <div class="pkg-desc">{c['desc']}</div>
+                <div class="pkg-meta">
+                  <span class="pkg-version">{c['version']}</span>
+                  <span class="pkg-date">{c['built_at']}</span>
+                  <span class="arrow">&#8594;</span>
                 </div>
-              </a>"
-          done
+              </a>"""
 
-          cd site && repo-add --new --remove builders.db.tar.gz *.pkg.tar.zst && cd ..
-
-          cat > site/index.html <<HTML
-          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>builders — cltq</title>
-          <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}.wrap{max-width:860px;margin:0 auto}header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}header h1{font-size:1.5rem;font-weight:700}header a{color:#58a6ff}.setup{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}.setup h2{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}.setup p{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}.cmd{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}.cmd:hover{border-color:#58a6ff}.cmd::after{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}.pkg-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}.pkg-card:hover{border-color:#58a6ff;background:#1c2230}.pkg-name{font-size:1.05rem;font-weight:600}.pkg-desc{font-size:.82rem;color:#8b949e;flex:1}.pkg-meta{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}.pkg-version{font-size:.78rem;color:#79c0ff;font-family:monospace}.pkg-date{font-size:.75rem;color:#484f58}.arrow{color:#30363d;margin-left:auto}.pkg-card:hover .arrow{color:#58a6ff}</style></head>
+          # Root index
+          (site / "index.html").write_text(f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+          <title>builders — cltq</title>
+          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}}.wrap{{max-width:860px;margin:0 auto}}header{{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}}header h1{{font-size:1.5rem;font-weight:700}}header a{{color:#58a6ff}}.setup{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}}.setup h2{{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}}.setup p{{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.pkg-card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}}.pkg-card:hover{{border-color:#58a6ff;background:#1c2230}}.pkg-name{{font-size:1.05rem;font-weight:600}}.pkg-desc{{font-size:.82rem;color:#8b949e;flex:1}}.pkg-meta{{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}}.pkg-version{{font-size:.78rem;color:#79c0ff;font-family:monospace}}.pkg-date{{font-size:.75rem;color:#484f58}}.arrow{{color:#30363d;margin-left:auto}}.pkg-card:hover .arrow{{color:#58a6ff}}</style></head>
           <body><div class="wrap">
             <header>
               <div><h1>builders</h1><p style="color:#8b949e;font-size:.85rem">Pre-built Arch Linux packages — <a href="https://github.com/cltq/builders">cltq/builders</a></p></div>
-              <p style="color:#484f58;font-size:.8rem">${BUILD_DATE}</p>
+              <p style="color:#484f58;font-size:.8rem">{build_date}</p>
             </header>
             <div class="setup">
               <h2>Add as pacman repository</h2>
@@ -612,42 +652,34 @@ jobs:
           Server = https://cltq.github.io/builders</div>
               <div class="cmd" onclick="navigator.clipboard.writeText('sudo pacman -Sy')">sudo pacman -Sy</div>
             </div>
-            <div class="grid">${CARDS_HTML}</div>
+            <div class="grid">{cards_html}</div>
           </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{el.addEventListener("click",()=>{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)})});</script>
-          </body></html>
-          HTML
+          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
+          </body></html>""")
 
-          {
-            echo "VERSIONS_JSON<<EOF"
-            echo "${VERSIONS_JSON:-{}}"
-            echo "EOF"
-          } >> $GITHUB_ENV
-          SCRIPT
-          '
+          with open("new_versions.json", "w") as f:
+              json.dump(versions, f)
+          PYEOF
 
       - name: Update versions.json
         run: |
-          python3 - <<EOF
-          import json, os
-          
+          python3 - <<'EOF'
+          import json
           try:
               with open("versions.json") as f:
                   existing = json.load(f)
           except FileNotFoundError:
               existing = {}
-          
-          data = os.environ.get("VERSIONS_JSON")
-          
-          if not data:
-              print("No VERSIONS_JSON found, skipping update.")
-              exit(0)
-          
-          existing.update(json.loads(data))
-          
+          with open("new_versions.json") as f:
+              existing.update(json.load(f))
           with open("versions.json", "w") as f:
               json.dump(existing, f, indent=2)
           EOF
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          git diff --cached --quiet || git commit -m "chore: update built versions (full) [skip ci]"
+          git push
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
