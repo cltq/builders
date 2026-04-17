@@ -199,3 +199,43 @@ jobs:
           name: pkg-slow-${{ matrix.name }}
           path: |
             /build/*.pkg.tar.zst
+
+  assemble:
+    name: Build pacman repo
+    needs: [build_fast, build_slow]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build repo database
+        run: |
+          mkdir repo
+          find artifacts -name "*.pkg.tar.zst" -exec cp {} repo/ \;
+
+          cd repo
+
+          # 🔥 Important: filenames already sanitized earlier
+          repo-add builders.db.tar.gz *.pkg.tar.zst
+
+          # GitHub Pages hates symlinks → replace with real files
+          cp builders.db.tar.gz builders.db
+          cp builders.files.tar.gz builders.files
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - name: Deploy
+        uses: actions/deploy-pages@v4

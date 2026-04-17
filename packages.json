@@ -24,12 +24,6 @@
     "slow": true
   },
   {
-    "name": "quickshell",
-    "description": "Scriptable toolkit for creating desktop shells using Qt Quick",
-    "watch": true,
-    "slow": true
-  },
-  {
     "name": "visual-studio-code-bin",
     "description": "Visual Studio Code editor (official Microsoft binary)",
     "watch": true,
@@ -51,6 +45,6 @@
     "name": "tuxmanager",
     "description": "Windows-like System Monitor",
     "watch": true,
-    "slow": false
+    "slow": true
   }
 ]
