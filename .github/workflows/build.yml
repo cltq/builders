@@ -1,3 +1,4 @@
+```yaml
 name: Build packages
 
 on:
@@ -24,9 +25,6 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
-# ---------------------------------------------------------------------------
-# JOB 1 — decide which packages need building, split into fast/slow matrices
-# ---------------------------------------------------------------------------
 jobs:
   check:
     name: Check versions
@@ -38,11 +36,9 @@ jobs:
       has_slow:     ${{ steps.set-matrix.outputs.has_slow }}
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Resolve build matrices
-        id: set-matrix
+      - id: set-matrix
         env:
           TRIGGER:   ${{ github.event_name }}
           FORCE_ALL: ${{ github.event.inputs.force_all || 'false' }}
@@ -62,629 +58,146 @@ jobs:
           except FileNotFoundError:
               known = {}
 
-          def aur_version(aur_name):
-              url = f"https://aur.archlinux.org/rpc/v5/info/{aur_name}"
+          def aur_version(name):
               try:
-                  with urllib.request.urlopen(url, timeout=10) as r:
+                  with urllib.request.urlopen(f"https://aur.archlinux.org/rpc/v5/info/{name}", timeout=10) as r:
                       data = json.loads(r.read())
-                  results = data.get("results", [])
-                  return results[0]["Version"] if results else None
-              except Exception as e:
-                  print(f"  AUR lookup failed for {aur_name}: {e}")
+                  return data["results"][0]["Version"]
+              except:
                   return None
 
           fast, slow = [], []
 
           for pkg in packages:
-              name     = pkg["name"]
-              aur_name = pkg.get("aur_name", name)
-              watch    = pkg.get("watch", False)
-              is_slow  = pkg.get("slow", False)
-              desc     = pkg.get("description", "")
+              name = pkg["name"]
+              aur  = pkg.get("aur_name", name)
+              watch = pkg.get("watch", False)
+              slow_flag = pkg.get("slow", False)
 
               if trigger == "schedule" and not force_all:
                   if not watch:
-                      print(f"  skip {name}: watch=false")
                       continue
-                  latest = aur_version(aur_name)
-                  if latest is None:
-                      print(f"  skip {name}: AUR lookup failed")
+                  latest = aur_version(aur)
+                  if not latest or known.get(name) == latest:
                       continue
-                  if known.get(name) == latest:
-                      print(f"  skip {name}: already at {latest}")
-                      continue
-                  print(f"  queue {name} ({'slow' if is_slow else 'fast'}): {known.get(name, 'new')} -> {latest}")
-              else:
-                  print(f"  queue {name} ({'slow' if is_slow else 'fast'}): forced/push build")
 
-              entry = {"name": name, "aur_name": aur_name, "description": desc}
-              (slow if is_slow else fast).append(entry)
-
-          print(f"\nFast ({len(fast)}): {[p['name'] for p in fast]}")
-          print(f"Slow ({len(slow)}): {[p['name'] for p in slow]}")
+              entry = {"name": name, "aur_name": aur, "description": pkg.get("description", "")}
+              (slow if slow_flag else fast).append(entry)
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              import json
               out.write(f"fast_matrix={json.dumps({'include': fast})}\n")
               out.write(f"slow_matrix={json.dumps({'include': slow})}\n")
               out.write(f"has_fast={'true' if fast else 'false'}\n")
               out.write(f"has_slow={'true' if slow else 'false'}\n")
           EOF
 
-# ---------------------------------------------------------------------------
-# JOB 2a — fast packages
-# ---------------------------------------------------------------------------
   build_fast:
-    name: "Fast: ${{ matrix.name }}"
     needs: check
     if: needs.check.outputs.has_fast == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
+    container: archlinux:latest
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check.outputs.fast_matrix) }}
 
     steps:
-      - name: Update system & install base dependencies
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl
+      - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - name: Create build user
-        run: |
+      - run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      - name: Clone AUR repo
-        run: |
+      - run: |
           git clone https://aur.archlinux.org/${{ matrix.aur_name }}.git /build
           chown -R builder:builder /build
 
-      - name: Bootstrap yay for AUR dependency resolution
-        run: |
-          git clone https://aur.archlinux.org/yay.git /yay-bootstrap
-          chown -R builder:builder /yay-bootstrap
-          su builder -c "
-            cd /yay-bootstrap
-            sudo pacman -S --noconfirm --needed go
-            makepkg -s --noconfirm --noprogressbar
-          "
-          pacman -U --noconfirm /yay-bootstrap/*.pkg.tar.zst
+      - run: |
+          git clone https://aur.archlinux.org/yay.git /yay
+          chown -R builder:builder /yay
+          su builder -c "cd /yay && makepkg -si --noconfirm --skipchecksums"
 
-      - name: Install dependencies (official + AUR) via yay
-        run: |
+      - run: |
           su builder -c "
             cd /build
-            source ./PKGBUILD 2>/dev/null || true
+            source PKGBUILD || true
             DEPS=()
-            [ -n \"\${depends[*]+x}\"     ] && DEPS+=(\"\${depends[@]}\")
+            [ -n \"\${depends[*]+x}\" ] && DEPS+=(\"\${depends[@]}\")
             [ -n \"\${makedepends[*]+x}\" ] && DEPS+=(\"\${makedepends[@]}\")
-            if [ \${#DEPS[@]} -gt 0 ]; then
-              yay -S --noconfirm --needed --asdeps \"\${DEPS[@]}\" || true
-            fi
+            [ \${#DEPS[@]} -gt 0 ] && yay -S --noconfirm --needed --asdeps \"\${DEPS[@]}\" || true
           "
 
-      - name: Import required GPG keys
-        run: |
-          su builder -c "
-            cd /build
-            source ./PKGBUILD 2>/dev/null || true
-            if [ -n \"\${validpgpkeys[*]+x}\" ]; then
-              for KEY in \"\${validpgpkeys[@]}\"; do
-                gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys \"\$KEY\" 2>/dev/null \
-                || gpg --keyserver hkps://keys.openpgp.org   --recv-keys \"\$KEY\" 2>/dev/null \
-                || gpg --keyserver hkp://pgp.mit.edu         --recv-keys \"\$KEY\" 2>/dev/null \
-                || echo \"WARNING: Could not import \$KEY\"
-              done
-            fi
-          "
+      - run: |
+          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
 
-      - name: Build .pkg.tar.zst
-        run: su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
-
-      - name: Collect package info & sanitize filename
-        id: info
+      - id: sanitize
         run: |
           PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
-          PKG_FILENAME=$(basename "$PKG_FILE")
-          SAFE_FILENAME=$(echo "$PKG_FILENAME" | tr ':' '_')
-          [ "$PKG_FILENAME" != "$SAFE_FILENAME" ] && mv "$PKG_FILE" "/build/$SAFE_FILENAME"
-          PKG_VERSION=$(echo "$SAFE_FILENAME" \
-            | sed "s/^${{ matrix.name }}-//" \
-            | sed 's/-[^-]*\.pkg\.tar\.zst$//')
-          echo "filename=$SAFE_FILENAME" >> $GITHUB_OUTPUT
-          echo "version=$PKG_VERSION"    >> $GITHUB_OUTPUT
+          NAME=$(basename "$PKG_FILE")
+          SAFE=$(echo "$NAME" | tr ':"<>|*?\r\n' '_')
 
-      - name: Write metadata
-        run: |
-          cat > /build/meta.json <<JSON
-          {
-            "name":        "${{ matrix.name }}",
-            "aur_name":    "${{ matrix.aur_name }}",
-            "description": "${{ matrix.description }}",
-            "version":     "${{ steps.info.outputs.version }}",
-            "filename":    "${{ steps.info.outputs.filename }}",
-            "built_at":    "$(date -u '+%Y-%m-%d %H:%M UTC')",
-            "commit":      "${{ github.sha }}"
-          }
-          JSON
+          if [ "$NAME" != "$SAFE" ]; then
+            mv "$PKG_FILE" "/build/$SAFE"
+          fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
+
+          if ls /build/*.pkg.tar.zst | grep -q ':'; then
+            echo "Unsafe filename remains"
+            exit 1
+          fi
+
+          echo "file=$SAFE" >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
         with:
           name: pkg-fast-${{ matrix.name }}
           path: |
             /build/*.pkg.tar.zst
-            /build/meta.json
 
-# ---------------------------------------------------------------------------
-# JOB 2b — slow packages
-# ---------------------------------------------------------------------------
   build_slow:
-    name: "Slow: ${{ matrix.name }}"
     needs: check
     if: needs.check.outputs.has_slow == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
+    container: archlinux:latest
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check.outputs.slow_matrix) }}
 
     steps:
-      - name: Update system & install base dependencies
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl
+      - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - name: Create build user
-        run: |
+      - run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      - name: Clone AUR repo
-        run: |
+      - run: |
           git clone https://aur.archlinux.org/${{ matrix.aur_name }}.git /build
           chown -R builder:builder /build
 
-      - name: Bootstrap yay for AUR dependency resolution
-        run: |
-          git clone https://aur.archlinux.org/yay.git /yay-bootstrap
-          chown -R builder:builder /yay-bootstrap
-          su builder -c "
-            cd /yay-bootstrap
-            sudo pacman -S --noconfirm --needed go
-            makepkg -s --noconfirm --noprogressbar
-          "
-          pacman -U --noconfirm /yay-bootstrap/*.pkg.tar.zst
+      - run: |
+          git clone https://aur.archlinux.org/yay.git /yay
+          chown -R builder:builder /yay
+          su builder -c "cd /yay && makepkg -si --noconfirm --skipchecksums"
 
-      - name: Install dependencies (official + AUR) via yay
-        run: |
-          su builder -c "
-            cd /build
-            source ./PKGBUILD 2>/dev/null || true
-            DEPS=()
-            [ -n \"\${depends[*]+x}\"     ] && DEPS+=(\"\${depends[@]}\")
-            [ -n \"\${makedepends[*]+x}\" ] && DEPS+=(\"\${makedepends[@]}\")
-            if [ \${#DEPS[@]} -gt 0 ]; then
-              yay -S --noconfirm --needed --asdeps \"\${DEPS[@]}\" || true
-            fi
-          "
+      - run: |
+          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
 
-      - name: Import required GPG keys
-        run: |
-          su builder -c "
-            cd /build
-            source ./PKGBUILD 2>/dev/null || true
-            if [ -n \"\${validpgpkeys[*]+x}\" ]; then
-              for KEY in \"\${validpgpkeys[@]}\"; do
-                gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys \"\$KEY\" 2>/dev/null \
-                || gpg --keyserver hkps://keys.openpgp.org   --recv-keys \"\$KEY\" 2>/dev/null \
-                || gpg --keyserver hkp://pgp.mit.edu         --recv-keys \"\$KEY\" 2>/dev/null \
-                || echo \"WARNING: Could not import \$KEY\"
-              done
-            fi
-          "
-
-      - name: Build .pkg.tar.zst
-        run: su builder -c "cd /build && makepkg -s --noconfirm --noprogressbar"
-
-      - name: Collect package info & sanitize filename
-        id: info
+      - id: sanitize
         run: |
           PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
-          PKG_FILENAME=$(basename "$PKG_FILE")
-          SAFE_FILENAME=$(echo "$PKG_FILENAME" | tr ':' '_')
-          [ "$PKG_FILENAME" != "$SAFE_FILENAME" ] && mv "$PKG_FILE" "/build/$SAFE_FILENAME"
-          PKG_VERSION=$(echo "$SAFE_FILENAME" \
-            | sed "s/^${{ matrix.name }}-//" \
-            | sed 's/-[^-]*\.pkg\.tar\.zst$//')
-          echo "filename=$SAFE_FILENAME" >> $GITHUB_OUTPUT
-          echo "version=$PKG_VERSION"    >> $GITHUB_OUTPUT
+          NAME=$(basename "$PKG_FILE")
+          SAFE=$(echo "$NAME" | tr ':"<>|*?\r\n' '_')
 
-      - name: Write metadata
-        run: |
-          cat > /build/meta.json <<JSON
-          {
-            "name":        "${{ matrix.name }}",
-            "aur_name":    "${{ matrix.aur_name }}",
-            "description": "${{ matrix.description }}",
-            "version":     "${{ steps.info.outputs.version }}",
-            "filename":    "${{ steps.info.outputs.filename }}",
-            "built_at":    "$(date -u '+%Y-%m-%d %H:%M UTC')",
-            "commit":      "${{ github.sha }}"
-          }
-          JSON
+          if [ "$NAME" != "$SAFE" ]; then
+            mv "$PKG_FILE" "/build/$SAFE"
+          fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
+
+      - uses: actions/upload-artifact@v4
         with:
           name: pkg-slow-${{ matrix.name }}
           path: |
             /build/*.pkg.tar.zst
-            /build/meta.json
-
-# ---------------------------------------------------------------------------
-# Shared shell function used by both assemble jobs
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# JOB 3a — deploy fast packages immediately
-# ---------------------------------------------------------------------------
-  assemble_fast:
-    name: Deploy (fast packages)
-    needs: build_fast
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-
-    environment:
-      name: github-pages
-      url: https://cltq.github.io/builders/
-
-    steps:
-      - name: Install tools
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm git python
-
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Download fast artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pkg-fast-*
-          path: artifacts
-
-      - name: Build site & pacman repo
-        run: |
-          python3 << 'PYEOF'
-          import json, os, shutil, subprocess
-          from pathlib import Path
-
-          site = Path("site")
-          site.mkdir(exist_ok=True)
-
-          build_date = subprocess.check_output(["date", "-u", "+%Y-%m-%d %H:%M UTC"]).decode().strip()
-          versions = {}
-          cards = []
-
-          for meta_path in sorted(Path("artifacts").glob("*/meta.json")):
-              pkg_dir = meta_path.parent
-              pkg_files = list(pkg_dir.glob("*.pkg.tar.zst"))
-              if not pkg_files:
-                  continue
-              pkg_file = pkg_files[0]
-
-              with open(meta_path) as f:
-                  m = json.load(f)
-
-              name     = m["name"]
-              desc     = m["description"]
-              version  = m["version"]
-              filename = m["filename"]
-              built_at = m["built_at"]
-
-              versions[name] = version
-
-              # Copy package to site root (for pacman repo) and per-package dir
-              shutil.copy(pkg_file, site / filename)
-              pkg_page = site / name
-              pkg_page.mkdir(exist_ok=True)
-              shutil.copy(pkg_file, pkg_page / filename)
-              shutil.copy(meta_path, pkg_page / "meta.json")
-
-              cards.append({"name": name, "desc": desc, "version": version,
-                            "filename": filename, "built_at": built_at})
-
-              # Per-package page
-              (pkg_page / "index.html").write_text(f"""<!DOCTYPE html>
-          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-          <title>{name} — builders</title>
-          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}}.card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}}.back{{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}}.back:hover{{text-decoration:underline}}.badge{{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}}h1{{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}}.subtitle{{color:#8b949e;font-size:.9rem;margin-bottom:2rem}}.meta{{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}}.meta span{{color:#e6edf3}}.dl-btn{{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}}.dl-btn:hover{{background:#2ea043}}h2{{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem;display:block}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}}.section{{margin-top:1.5rem}}</style></head>
-          <body><div class="card">
-            <a class="back" href=".."><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"/></svg> All packages</a>
-            <div class="badge">Latest Build</div>
-            <h1>{name}</h1><p class="subtitle">{desc}</p>
-            <div class="meta">
-              <div>Version&nbsp;<span>{version}</span></div>
-              <div>File&nbsp;<span>{filename}</span></div>
-              <div>Built&nbsp;<span>{built_at}</span></div>
-              <div>Target&nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
-            </div>
-            <a class="dl-btn" href="{filename}" download="{filename}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download {filename}</a>
-            <div class="section"><h2>Install via pacman repo</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
-          Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy {name}</div>
-            </div>
-            <div class="section"><h2>One-off install</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/{filename}</div>
-            </div>
-          </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
-          </body></html>""")
-
-          # Generate pacman repo database
-          pkg_files_in_site = list(site.glob("*.pkg.tar.zst"))
-          subprocess.run(["repo-add", "--new", "--remove", "builders.db.tar.gz"] +
-                         [str(p) for p in pkg_files_in_site],
-                         cwd=site, check=True)
-
-          # GitHub Pages doesn't serve symlinks — copy real files
-          for link_name, tar_name in [("builders.db", "builders.db.tar.gz"),
-                                       ("builders.files", "builders.files.tar.gz")]:
-              link = site / link_name
-              tar  = site / tar_name
-              if link.is_symlink():
-                  link.unlink()
-              if tar.exists():
-                  shutil.copy(tar, link)
-
-          # Build cards HTML
-          cards_html = ""
-          for c in cards:
-              cards_html += f"""
-              <a class="pkg-card" href="{c['name']}/">
-                <div class="pkg-name">{c['name']}</div>
-                <div class="pkg-desc">{c['desc']}</div>
-                <div class="pkg-meta">
-                  <span class="pkg-version">{c['version']}</span>
-                  <span class="pkg-date">{c['built_at']}</span>
-                  <span class="arrow">&#8594;</span>
-                </div>
-              </a>"""
-
-          # Root index
-          (site / "index.html").write_text(f"""<!DOCTYPE html>
-          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-          <title>builders — cltq</title>
-          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}}.wrap{{max-width:860px;margin:0 auto}}header{{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}}header h1{{font-size:1.5rem;font-weight:700}}header a{{color:#58a6ff}}.setup{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}}.setup h2{{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}}.setup p{{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.pkg-card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}}.pkg-card:hover{{border-color:#58a6ff;background:#1c2230}}.pkg-name{{font-size:1.05rem;font-weight:600}}.pkg-desc{{font-size:.82rem;color:#8b949e;flex:1}}.pkg-meta{{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}}.pkg-version{{font-size:.78rem;color:#79c0ff;font-family:monospace}}.pkg-date{{font-size:.75rem;color:#484f58}}.arrow{{color:#30363d;margin-left:auto}}.pkg-card:hover .arrow{{color:#58a6ff}}.notice{{font-size:.78rem;color:#484f58;margin-top:2rem;text-align:center}}</style></head>
-          <body><div class="wrap">
-            <header>
-              <div><h1>builders</h1><p style="color:#8b949e;font-size:.85rem">Pre-built Arch Linux packages — <a href="https://github.com/cltq/builders">cltq/builders</a></p></div>
-              <p style="color:#484f58;font-size:.8rem">{build_date}</p>
-            </header>
-            <div class="setup">
-              <h2>Add as pacman repository</h2>
-              <p>Add to <code style="color:#e6edf3">/etc/pacman.conf</code>, then install any package with <code style="color:#e6edf3">pacman -S</code>:</p>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
-          Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText('sudo pacman -Sy')">sudo pacman -Sy</div>
-            </div>
-            <div class="grid">{cards_html}</div>
-            <p class="notice">&#9203; Some packages (darkly, quickshell) have longer build times and may appear here after a delay.</p>
-          </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
-          </body></html>""")
-
-          # Write versions for next step
-          with open("new_versions.json", "w") as f:
-              json.dump(versions, f)
-          PYEOF
-
-      - name: Update versions.json
-        run: |
-          python3 - <<'EOF'
-          import json
-          try:
-              with open("versions.json") as f:
-                  existing = json.load(f)
-          except FileNotFoundError:
-              existing = {}
-          with open("new_versions.json") as f:
-              existing.update(json.load(f))
-          with open("versions.json", "w") as f:
-              json.dump(existing, f, indent=2)
-          EOF
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add versions.json
-          git diff --cached --quiet || git commit -m "chore: update built versions (fast) [skip ci]"
-          git push
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
-
-# ---------------------------------------------------------------------------
-# JOB 3b — deploy full site once slow packages finish
-# ---------------------------------------------------------------------------
-  assemble_full:
-    name: Deploy (all packages)
-    needs: [build_fast, build_slow]
-    if: |
-      github.event_name != 'pull_request' &&
-      always() &&
-      needs.build_slow.result == 'success'
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-
-    environment:
-      name: github-pages
-      url: https://cltq.github.io/builders/
-
-    steps:
-      - name: Install tools
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm git python
-
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Download ALL artifacts (fast + slow)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pkg-*
-          path: artifacts
-
-      - name: Build site & pacman repo
-        run: |
-          python3 << 'PYEOF'
-          import json, os, shutil, subprocess
-          from pathlib import Path
-
-          site = Path("site")
-          site.mkdir(exist_ok=True)
-
-          build_date = subprocess.check_output(["date", "-u", "+%Y-%m-%d %H:%M UTC"]).decode().strip()
-          versions = {}
-          cards = []
-
-          for meta_path in sorted(Path("artifacts").glob("*/meta.json")):
-              pkg_dir = meta_path.parent
-              pkg_files = list(pkg_dir.glob("*.pkg.tar.zst"))
-              if not pkg_files:
-                  continue
-              pkg_file = pkg_files[0]
-
-              with open(meta_path) as f:
-                  m = json.load(f)
-
-              name     = m["name"]
-              desc     = m["description"]
-              version  = m["version"]
-              filename = m["filename"]
-              built_at = m["built_at"]
-
-              versions[name] = version
-
-              shutil.copy(pkg_file, site / filename)
-              pkg_page = site / name
-              pkg_page.mkdir(exist_ok=True)
-              shutil.copy(pkg_file, pkg_page / filename)
-              shutil.copy(meta_path, pkg_page / "meta.json")
-
-              cards.append({"name": name, "desc": desc, "version": version,
-                            "filename": filename, "built_at": built_at})
-
-              (pkg_page / "index.html").write_text(f"""<!DOCTYPE html>
-          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-          <title>{name} — builders</title>
-          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}}.card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2.5rem 3rem;max-width:600px;width:100%}}.back{{display:inline-flex;align-items:center;gap:.4rem;color:#58a6ff;font-size:.82rem;text-decoration:none;margin-bottom:1.5rem}}.back:hover{{text-decoration:underline}}.badge{{display:inline-block;background:#388bfd22;color:#58a6ff;border:1px solid #388bfd55;border-radius:999px;font-size:.75rem;padding:2px 10px;margin-bottom:1rem;letter-spacing:.04em;text-transform:uppercase}}h1{{font-size:1.8rem;font-weight:700;margin-bottom:.3rem}}.subtitle{{color:#8b949e;font-size:.9rem;margin-bottom:2rem}}.meta{{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:1rem 1.2rem;font-size:.82rem;color:#8b949e;margin-bottom:2rem;display:grid;gap:.4rem}}.meta span{{color:#e6edf3}}.dl-btn{{display:inline-flex;align-items:center;gap:.6rem;background:#238636;color:#fff;text-decoration:none;padding:.75rem 1.4rem;border-radius:8px;font-weight:600;font-size:.95rem;transition:background .15s}}.dl-btn:hover{{background:#2ea043}}h2{{font-size:.75rem;font-weight:600;margin:2rem 0 .6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.7rem 1rem;font-size:.82rem;color:#79c0ff;word-break:break-all;cursor:pointer;font-family:monospace;position:relative;margin-bottom:.4rem;display:block}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58}}.section{{margin-top:1.5rem}}</style></head>
-          <body><div class="card">
-            <a class="back" href=".."><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"/></svg> All packages</a>
-            <div class="badge">Latest Build</div>
-            <h1>{name}</h1><p class="subtitle">{desc}</p>
-            <div class="meta">
-              <div>Version&nbsp;<span>{version}</span></div>
-              <div>File&nbsp;<span>{filename}</span></div>
-              <div>Built&nbsp;<span>{built_at}</span></div>
-              <div>Target&nbsp;<span>linux/x86_64 (Arch Linux)</span></div>
-            </div>
-            <a class="dl-btn" href="{filename}" download="{filename}"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75Z"/><path d="M1.75 13.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75Z"/></svg> Download {filename}</a>
-            <div class="section"><h2>Install via pacman repo</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
-          Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -Sy {name}</div>
-            </div>
-            <div class="section"><h2>One-off install</h2>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">sudo pacman -U https://cltq.github.io/builders/{filename}</div>
-            </div>
-          </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
-          </body></html>""")
-
-          # Generate pacman repo database
-          pkg_files_in_site = list(site.glob("*.pkg.tar.zst"))
-          subprocess.run(["repo-add", "--new", "--remove", "builders.db.tar.gz"] +
-                         [str(p) for p in pkg_files_in_site],
-                         cwd=site, check=True)
-
-          # GitHub Pages doesn't serve symlinks — replace with real files
-          for link_name, tar_name in [("builders.db", "builders.db.tar.gz"),
-                                       ("builders.files", "builders.files.tar.gz")]:
-              link = site / link_name
-              tar  = site / tar_name
-              if link.is_symlink():
-                  link.unlink()
-              if tar.exists():
-                  shutil.copy(tar, link)
-
-          # Build cards HTML
-          cards_html = ""
-          for c in cards:
-              cards_html += f"""
-              <a class="pkg-card" href="{c['name']}/">
-                <div class="pkg-name">{c['name']}</div>
-                <div class="pkg-desc">{c['desc']}</div>
-                <div class="pkg-meta">
-                  <span class="pkg-version">{c['version']}</span>
-                  <span class="pkg-date">{c['built_at']}</span>
-                  <span class="arrow">&#8594;</span>
-                </div>
-              </a>"""
-
-          # Root index
-          (site / "index.html").write_text(f"""<!DOCTYPE html>
-          <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-          <title>builders — cltq</title>
-          <style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;background:#0d1117;color:#e6edf3;min-height:100vh;padding:3rem 2rem}}.wrap{{max-width:860px;margin:0 auto}}header{{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}}header h1{{font-size:1.5rem;font-weight:700}}header a{{color:#58a6ff}}.setup{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;margin-bottom:2rem}}.setup h2{{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:.8rem}}.setup p{{font-size:.82rem;color:#8b949e;margin-bottom:.6rem}}.cmd{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.6rem 1rem;font-size:.82rem;color:#79c0ff;font-family:monospace;cursor:pointer;display:block;margin-bottom:.4rem;position:relative;word-break:break-all}}.cmd:hover{{border-color:#58a6ff}}.cmd::after{{content:"click to copy";position:absolute;right:.7rem;top:50%;transform:translateY(-50%);font-size:.7rem;color:#484f58;white-space:nowrap}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.pkg-card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.4rem 1.6rem;text-decoration:none;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:.5rem}}.pkg-card:hover{{border-color:#58a6ff;background:#1c2230}}.pkg-name{{font-size:1.05rem;font-weight:600}}.pkg-desc{{font-size:.82rem;color:#8b949e;flex:1}}.pkg-meta{{display:flex;align-items:center;justify-content:space-between;margin-top:.6rem;flex-wrap:wrap;gap:.4rem}}.pkg-version{{font-size:.78rem;color:#79c0ff;font-family:monospace}}.pkg-date{{font-size:.75rem;color:#484f58}}.arrow{{color:#30363d;margin-left:auto}}.pkg-card:hover .arrow{{color:#58a6ff}}</style></head>
-          <body><div class="wrap">
-            <header>
-              <div><h1>builders</h1><p style="color:#8b949e;font-size:.85rem">Pre-built Arch Linux packages — <a href="https://github.com/cltq/builders">cltq/builders</a></p></div>
-              <p style="color:#484f58;font-size:.8rem">{build_date}</p>
-            </header>
-            <div class="setup">
-              <h2>Add as pacman repository</h2>
-              <p>Add to <code style="color:#e6edf3">/etc/pacman.conf</code>, then install any package with <code style="color:#e6edf3">pacman -S</code>:</p>
-              <div class="cmd" onclick="navigator.clipboard.writeText(this.innerText)">[builders]
-          Server = https://cltq.github.io/builders</div>
-              <div class="cmd" onclick="navigator.clipboard.writeText('sudo pacman -Sy')">sudo pacman -Sy</div>
-            </div>
-            <div class="grid">{cards_html}</div>
-          </div>
-          <script>document.querySelectorAll(".cmd").forEach(el=>{{el.addEventListener("click",()=>{{navigator.clipboard.writeText(el.innerText.split("#")[0].trim());el.style.borderColor="#3fb950";setTimeout(()=>el.style.borderColor="",1200)}})}});</script>
-          </body></html>""")
-
-          with open("new_versions.json", "w") as f:
-              json.dump(versions, f)
-          PYEOF
-
-      - name: Update versions.json
-        run: |
-          python3 - <<'EOF'
-          import json
-          try:
-              with open("versions.json") as f:
-                  existing = json.load(f)
-          except FileNotFoundError:
-              existing = {}
-          with open("new_versions.json") as f:
-              existing.update(json.load(f))
-          with open("versions.json", "w") as f:
-              json.dump(existing, f, indent=2)
-          EOF
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add versions.json
-          git diff --cached --quiet || git commit -m "chore: update built versions (full) [skip ci]"
-          git push
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+```
