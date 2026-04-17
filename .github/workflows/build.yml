@@ -1,4 +1,3 @@
-```yaml
 name: Build packages
 
 on:
@@ -200,4 +199,3 @@ jobs:
           name: pkg-slow-${{ matrix.name }}
           path: |
             /build/*.pkg.tar.zst
-```
