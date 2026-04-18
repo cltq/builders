@@ -136,11 +136,28 @@ jobs:
 
       - name: Build package
         run: |
+          echo "Files in /build before build:"
+          ls -la /build/
+          
           su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums --skippgpcheck"
+          
+          echo "Files in /build after build:"
+          ls -la /build/
+          
+          PKG_COUNT=$(ls /build/*.pkg.tar.zst 2>/dev/null | wc -l)
+          if [ "$PKG_COUNT" -eq 0 ]; then
+            echo "ERROR: Build failed - no package generated"
+            exit 1
+          fi
+          echo "Package generated successfully"
 
       - id: sanitize
         run: |
           PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
+          if [ -z "$PKG_FILE" ]; then
+            echo "No package file generated"
+            exit 1
+          fi
           NAME=$(basename "$PKG_FILE")
           SAFE=$(echo "$NAME" | tr ':"<>|*?\r\n' '_')
 
@@ -213,8 +230,39 @@ jobs:
           path: |
             /build/*.pkg.tar.zst
 
-  assemble:
-    name: Build pacman repo
+  assemble_fast:
+    name: Deploy fast packages
+    needs: build_fast
+    if: needs.check.outputs.has_fast == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git
+
+      - name: Download fast artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build repo
+        run: |
+          mkdir repo
+          find artifacts -name "*.pkg.tar.zst" -exec cp {} repo/ \;
+          cd repo
+          repo-add builders.db.tar.gz *.pkg.tar.zst
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - name: Deploy
+        uses: actions/deploy-pages@v4
+
+  assemble_all:
+    name: Deploy all packages
     needs: [build_fast, build_slow]
     if: needs.check.outputs.has_packages == 'true'
     runs-on: ubuntu-latest
