@@ -252,7 +252,7 @@ jobs:
 
     steps:
       - name: Install tools
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git python python
 
       - name: Download fast artifacts
         uses: actions/download-artifact@v4
@@ -299,7 +299,7 @@ jobs:
 
     steps:
       - name: Install tools
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib git python
 
       - name: Checkout repo
         uses: actions/checkout@v4
