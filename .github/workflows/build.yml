@@ -151,28 +151,30 @@ jobs:
           fi
           echo "Package generated successfully"
 
-      - id: sanitize
+      - name: Sanitize filenames
         run: |
-          PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
-          if [ -z "$PKG_FILE" ]; then
-            echo "No package file generated"
+          cd /build
+          echo "Package files before:"
+          ls -la *.pkg.tar.zst || true
+
+          for pkg in *.pkg.tar.zst; do
+            [ -f "$pkg" ] || continue
+            SAFE=$(echo "$pkg" | tr ':"<>|*?\r\n' '_')
+            if [ "$pkg" != "$SAFE" ]; then
+              mv "$pkg" "$SAFE"
+              echo "Renamed: $pkg -> $SAFE"
+            fi
+          done
+
+          echo "Package files after:"
+          ls -la *.pkg.tar.zst || true
+
+          MAIN_PKG=$(ls *.pkg.tar.zst 2>/dev/null | head -n1)
+          if [ -z "$MAIN_PKG" ]; then
+            echo "ERROR: No package file found"
             exit 1
           fi
-          NAME=$(basename "$PKG_FILE")
-          SAFE=$(echo "$NAME" | tr ':"<>|*?\r\n' '_')
-
-          if [ "$NAME" != "$SAFE" ]; then
-            mv "$PKG_FILE" "/build/$SAFE"
-          fi
-
-          find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
-
-          if ls /build/*.pkg.tar.zst | grep -q ':'; then
-            echo "Unsafe filename remains"
-            exit 1
-          fi
-
-          echo "file=$SAFE" >> $GITHUB_OUTPUT
+          echo "file=$MAIN_PKG" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
@@ -212,17 +214,23 @@ jobs:
         run: |
           su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums --skippgpcheck"
 
-      - id: sanitize
+      - name: Sanitize filenames
         run: |
-          PKG_FILE=$(ls /build/*.pkg.tar.zst | head -n1)
-          NAME=$(basename "$PKG_FILE")
-          SAFE=$(echo "$NAME" | tr ':"<>|*?\r\n' '_')
+          cd /build
+          for pkg in *.pkg.tar.zst; do
+            [ -f "$pkg" ] || continue
+            SAFE=$(echo "$pkg" | tr ':"<>|*?\r\n' '_')
+            if [ "$pkg" != "$SAFE" ]; then
+              mv "$pkg" "$SAFE"
+            fi
+          done
 
-          if [ "$NAME" != "$SAFE" ]; then
-            mv "$PKG_FILE" "/build/$SAFE"
+          MAIN_PKG=$(ls *.pkg.tar.zst 2>/dev/null | head -n1)
+          if [ -z "$MAIN_PKG" ]; then
+            echo "ERROR: No package file found"
+            exit 1
           fi
-
-          find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
+          echo "file=$MAIN_PKG" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
