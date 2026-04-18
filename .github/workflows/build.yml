@@ -110,6 +110,7 @@ jobs:
       - name: Import Spotify GPG key
         if: matrix.aur_name == 'spotify'
         run: |
+          pacman-key --init
           pacman-key --recv-keys 5384CE82BA52C83A
           pacman-key --lsign-key 5384CE82BA52C83A
 
@@ -166,6 +167,7 @@ jobs:
       - name: Import Spotify GPG key
         if: matrix.aur_name == 'spotify'
         run: |
+          pacman-key --init
           pacman-key --recv-keys 5384CE82BA52C83A
           pacman-key --lsign-key 5384CE82BA52C83A
 
