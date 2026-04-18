@@ -20,7 +20,7 @@
   {
     "name": "darkly",
     "description": "A flat dark Qt style based on Breeze",
-    "watch": true,
+    "watch": false,
     "slow": true
   },
   {
