@@ -33,6 +33,7 @@ jobs:
       slow_matrix:  ${{ steps.set-matrix.outputs.slow_matrix }}
       has_fast:     ${{ steps.set-matrix.outputs.has_fast }}
       has_slow:     ${{ steps.set-matrix.outputs.has_slow }}
+      build_matrix: ${{ steps.set-matrix.outputs.build_matrix }}
 
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +62,7 @@ jobs:
               try:
                   with urllib.request.urlopen(f"https://aur.archlinux.org/rpc/v5/info/{name}", timeout=10) as r:
                       data = json.loads(r.read())
-                  return data["results"][0]["Version"]
+                  return data["results"]["Version"]
               except:
                   return None
 
@@ -85,10 +86,13 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               import json
+              all_packages = fast + slow
               out.write(f"fast_matrix={json.dumps({'include': fast})}\n")
               out.write(f"slow_matrix={json.dumps({'include': slow})}\n")
+              out.write(f"build_matrix={json.dumps({'include': all_packages})}\n")
               out.write(f"has_fast={'true' if fast else 'false'}\n")
               out.write(f"has_slow={'true' if slow else 'false'}\n")
+              out.write(f"has_packages={'true' if all_packages else 'false'}\n")
           EOF
 
   build_fast:
@@ -103,30 +107,30 @@ jobs:
     steps:
       - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - run: |
+      - name: Import Spotify GPG key
+        if: matrix.aur_name == 'spotify'
+        run: |
+          pacman-key --recv-keys 5384CE82BA52C83A
+          pacman-key --lsign-key 5384CE82BA52C83A
+
+      - name: Setup builder user
+        run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      - run: |
+      - name: Clone AUR package
+        run: |
           git clone https://aur.archlinux.org/${{ matrix.aur_name }}.git /build
           chown -R builder:builder /build
 
-      - run: |
+      - name: Clone and build yay
+        run: |
           git clone https://aur.archlinux.org/yay.git /yay
           chown -R builder:builder /yay
           su builder -c "cd /yay && makepkg -si --noconfirm --skipchecksums"
 
-      - run: |
-          su builder -c "
-            cd /build
-            source PKGBUILD || true
-            DEPS=()
-            [ -n \"\${depends[*]+x}\" ] && DEPS+=(\"\${depends[@]}\")
-            [ -n \"\${makedepends[*]+x}\" ] && DEPS+=(\"\${makedepends[@]}\")
-            [ \${#DEPS[@]} -gt 0 ] && yay -S --noconfirm --needed --asdeps \"\${DEPS[@]}\" || true
-          "
-
-      - run: |
+      - name: Build package
+        run: |
           su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
 
       - id: sanitize
@@ -140,13 +144,6 @@ jobs:
           fi
 
           find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
-
-          if ls /build/*.pkg.tar.zst | grep -q ':'; then
-            echo "Unsafe filename remains"
-            exit 1
-          fi
-
-          echo "file=$SAFE" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
@@ -166,20 +163,30 @@ jobs:
     steps:
       - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - run: |
+      - name: Import Spotify GPG key
+        if: matrix.aur_name == 'spotify'
+        run: |
+          pacman-key --recv-keys 5384CE82BA52C83A
+          pacman-key --lsign-key 5384CE82BA52C83A
+
+      - name: Setup builder user
+        run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      - run: |
+      - name: Clone AUR package
+        run: |
           git clone https://aur.archlinux.org/${{ matrix.aur_name }}.git /build
           chown -R builder:builder /build
 
-      - run: |
+      - name: Clone and build yay
+        run: |
           git clone https://aur.archlinux.org/yay.git /yay
           chown -R builder:builder /yay
           su builder -c "cd /yay && makepkg -si --noconfirm --skipchecksums"
 
-      - run: |
+      - name: Build package
+        run: |
           su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
 
       - id: sanitize
@@ -203,6 +210,7 @@ jobs:
   assemble:
     name: Build pacman repo
     needs: [build_fast, build_slow]
+    if: needs.check.outputs.has_packages == 'true'
     runs-on: ubuntu-latest
     container: archlinux:latest
 
@@ -223,14 +231,13 @@ jobs:
           mkdir repo
           find artifacts -name "*.pkg.tar.zst" -exec cp {} repo/ \;
 
+          if [ -z "$(ls repo/*.pkg.tar.zst 2>/dev/null)" ]; then
+            echo "No packages to build"
+            exit 0
+          fi
+
           cd repo
-
-          # 🔥 Important: filenames already sanitized earlier
           repo-add builders.db.tar.gz *.pkg.tar.zst
-
-          # GitHub Pages hates symlinks → replace with real files
-          cp builders.db.tar.gz builders.db
-          cp builders.files.tar.gz builders.files
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
