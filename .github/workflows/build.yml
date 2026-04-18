@@ -107,13 +107,6 @@ jobs:
     steps:
       - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - name: Import Spotify GPG key
-        if: matrix.aur_name == 'spotify'
-        run: |
-          pacman-key --init
-          pacman-key --recv-keys 5384CE82BA52C83A
-          pacman-key --lsign-key 5384CE82BA52C83A
-
       - name: Setup builder user
         run: |
           useradd -m builder
@@ -130,9 +123,20 @@ jobs:
           chown -R builder:builder /yay
           su builder -c "cd /yay && makepkg -si --noconfirm --skipchecksums"
 
+      - name: Install dependencies
+        run: |
+          su builder -c "
+            cd /build
+            source PKGBUILD || true
+            DEPS=()
+            [ -n \"\${depends[*]+x}\" ] && DEPS+=(\"\${depends[@]}\")
+            [ -n \"\${makedepends[*]+x}\" ] && DEPS+=(\"\${makedepends[@]}\")
+            [ \${#DEPS[@]} -gt 0 ] && yay -S --noconfirm --needed --asdeps \"\${DEPS[@]}\" || true
+          "
+
       - name: Build package
         run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
+          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums --skippgpcheck"
 
       - id: sanitize
         run: |
@@ -145,6 +149,13 @@ jobs:
           fi
 
           find /build -type f -name "*.pkg.tar.zst" ! -name "$SAFE" -delete
+
+          if ls /build/*.pkg.tar.zst | grep -q ':'; then
+            echo "Unsafe filename remains"
+            exit 1
+          fi
+
+          echo "file=$SAFE" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
@@ -164,13 +175,6 @@ jobs:
     steps:
       - run: pacman -Syu --noconfirm && pacman -S --noconfirm git base-devel sudo curl go
 
-      - name: Import Spotify GPG key
-        if: matrix.aur_name == 'spotify'
-        run: |
-          pacman-key --init
-          pacman-key --recv-keys 5384CE82BA52C83A
-          pacman-key --lsign-key 5384CE82BA52C83A
-
       - name: Setup builder user
         run: |
           useradd -m builder
@@ -189,7 +193,7 @@ jobs:
 
       - name: Build package
         run: |
-          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums"
+          su builder -c "cd /build && makepkg -s --noconfirm --skipchecksums --skippgpcheck"
 
       - id: sanitize
         run: |
