@@ -86,13 +86,11 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               import json
-              all_packages = fast + slow
               out.write(f"fast_matrix={json.dumps({'include': fast})}\n")
               out.write(f"slow_matrix={json.dumps({'include': slow})}\n")
-              out.write(f"build_matrix={json.dumps({'include': all_packages})}\n")
               out.write(f"has_fast={'true' if fast else 'false'}\n")
               out.write(f"has_slow={'true' if slow else 'false'}\n")
-              out.write(f"has_packages={'true' if all_packages else 'false'}\n")
+              out.write(f"has_packages={'true' if (fast + slow) else 'false'}\n")
           EOF
 
   build_fast:
@@ -268,6 +266,23 @@ jobs:
           cd repo
           repo-add builders.db.tar.gz *.pkg.tar.zst
 
+      - name: Generate index
+        run: |
+          cd repo
+          python3 - <<'PYEOF'
+          import os
+          pkgs = sorted([f for f in os.listdir('.') if f.endswith('.pkg.tar.zst')])
+          html = '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n<title>Builders Repository</title>\n<style>\nbody { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }\ntable { width: 100%; border-collapse: collapse; }\nth, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }\nth { background: #f5f5f5; }\na { color: #0066cc; text-decoration: none; }\na:hover { text-decoration: underline; }\n</style>\n</head>\n<body>\n<h1>Builders Repository</h1>\n<p>Add to pacman.conf:</p>\n<pre>[builders]\nServer = https://cltq.github.io/builders/$repo</pre>\n<table>\n<tr><th>Package</th><th>Size</th></tr>\n'
+          for p in pkgs:
+            size = os.path.getsize(p)
+            size_h = f"{size//1024} KB" if size < 1024*1024 else f"{size//1024//1024} MB"
+            html += f'<tr><td><a href="{p}">{p}</a></td><td>{size_h}</td></tr>\n'
+          html += '</table>\n</body>\n</html>\n'
+          with open('index.html', 'w') as f:
+            f.write(html)
+          print(f"Generated index with {len(pkgs)} packages")
+          PYEOF
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -279,7 +294,6 @@ jobs:
   assemble_all:
     name: Deploy all packages
     needs: [build_fast, build_slow]
-    if: needs.check.outputs.has_packages == 'true'
     runs-on: ubuntu-latest
     container: archlinux:latest
 
